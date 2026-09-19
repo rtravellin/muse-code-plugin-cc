@@ -1,0 +1,14 @@
+# Muse Code Check
+
+Status: ready
+
+Checks:
+- node: v24.21.0
+- muse: Muse Code 1.3.0 (1.3.0-R3401.1)
+- launcher: muse
+- workspace: /tmp/muse-demo
+- auth: logged in to meta as you@example.com (oauth); probe succeeded (model muse-spark-1.3-contributor)
+- models: muse-spark-1.3, muse-spark-1.3-contributor (default), muse-spark-1.2, muse-spark-1.2-contributor — note: Your content, including inter-session messages, may be used for product improvement.
+- git: git version 2.53.0
+- session runtime: plugin-owned runs
+- review gate: disabled

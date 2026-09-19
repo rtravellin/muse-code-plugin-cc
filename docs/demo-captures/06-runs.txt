@@ -1,0 +1,46 @@
+# Muse Code Runs
+
+Session runtime: plugin-owned runs
+Review gate: disabled
+
+Active runs:
+| Run | Kind | Status | Phase | Elapsed | Muse Session ID | Summary | Actions |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| run-mu7n3ypg-mqcyes | delegate | running | thinking | 12s | 68e928be-6b0e-4d69-83c4-d519d4891810 | add a test file for math.js that checks add and div, then run it with node | `/muse:runs run-mu7n3ypg-mqcyes`<br>`/muse:stop run-mu7n3ypg-mqcyes` |
+
+Live details:
+- run-mu7n3ypg-mqcyes | running | delegate | Muse Code Delegate
+  Summary: add a test file for math.js that checks add and div, then run it with node
+  Phase: thinking
+  Elapsed: 12s
+  Muse session ID: 68e928be-6b0e-4d69-83c4-d519d4891810
+  Resume in Muse: muse resume 68e928be-6b0e-4d69-83c4-d519d4891810
+  Log: /tmp/muse-demo-data/state/muse-demo-ad3e710874bd28f4/jobs/run-mu7n3ypg-mqcyes.log
+  Progress:
+    Reading files.
+    Tool result: Read text file `/tmp/muse-demo/math.js`. 1|export function add(a, b) { 2| return a - b; // TODO 3|} 4| 5|export funct...
+    Thinking.
+    opening meta model stream attempt 1/10
+
+Latest finished:
+- run-mu7n3o5j-xho10s | completed | delegate | Muse Code Resume
+  Summary: math.js
+  Phase: done
+  Duration: 14s
+  Muse session ID: 0e85d396-30d5-49b0-b0a9-ab5681d3d29f
+  Resume in Muse: muse resume 0e85d396-30d5-49b0-b0a9-ab5681d3d29f
+
+Recent runs:
+- run-mu7n2r21-mu6cza | completed | delegate | Muse Code Delegate
+  Summary: Fixed [math.js](/tmp/muse-demo/.muse/worktrees/muse-demo-0e85d396-30d5-49b0-b0a9-ab5681d3d29f/math.js:2) to `return a + b`.
+  Phase: done
+  Duration: 43s
+  Muse session ID: 0e85d396-30d5-49b0-b0a9-ab5681d3d29f
+  Resume in Muse: muse resume 0e85d396-30d5-49b0-b0a9-ab5681d3d29f
+  Worktree: /tmp/muse-demo/.muse/worktrees/muse-demo-0e85d396-30d5-49b0-b0a9-ab5681d3d29f (muse/session-0e85d396-30d5-49b0-b0a9-ab5681d3d29f)
+- review-mu7n208j-jvvimj | completed | review | Muse Code Review
+  Summary: Review of unstaged diff in `math.js`:
+  Phase: done
+  Duration: 35s
+  Muse session ID: 169d8a35-f00e-4092-a12c-0c533ee50a10
+  Resume in Muse: muse resume 169d8a35-f00e-4092-a12c-0c533ee50a10

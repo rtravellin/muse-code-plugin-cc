@@ -1,0 +1,14 @@
+[muse-cc] Running muse exec (muse) as session 0e85d396-30d5-49b0-b0a9-ab5681d3d29f.
+[muse-cc] workspace root: /tmp/muse-demo/.muse/worktrees/muse-demo-0e85d396-30d5-49b0-b0a9-ab5681d3d29f (explicit)
+[muse-cc] workspace trust: trusted source=run-flag
+[muse-cc] Session ready: 0e85d396-30d5-49b0-b0a9-ab5681d3d29f.
+[muse-cc] Model: muse-spark-1.3-contributor.
+[muse-cc] Thinking.
+[muse-cc] opening meta model stream attempt 1/10
+[muse-cc] completed meta model stream attempt 1/10
+[muse-cc] session worktree retained at /tmp/muse-demo/.muse/worktrees/muse-demo-0e85d396-30d5-49b0-b0a9-ab5681d3d29f (caller-owned worktree retained)
+[muse-cc] Muse finished.
+math.js
+
+Muse session ID: 0e85d396-30d5-49b0-b0a9-ab5681d3d29f
+Resume in Muse: muse resume 0e85d396-30d5-49b0-b0a9-ab5681d3d29f

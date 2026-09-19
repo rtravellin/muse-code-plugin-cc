@@ -1,0 +1,21 @@
+{
+  "name": "meta-muse-code",
+  "owner": {
+    "name": "rtravellin"
+  },
+  "metadata": {
+    "description": "Muse Code ↔ Claude Code bridge plugins for review, critique, delegation, and session transfer.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "muse",
+      "description": "Use Meta's Muse Code from Claude Code to review code or delegate tasks.",
+      "version": "0.1.0",
+      "author": {
+        "name": "rtravellin"
+      },
+      "source": "./plugins/muse"
+    }
+  ]
+}

@@ -1,0 +1,26 @@
+Muse Code Plugin for Claude Code
+Copyright 2026 rtravellin
+
+This plugin is a community bridge between Meta's Muse Code CLI and Claude Code.
+It is not affiliated with, endorsed by, or supported by Meta Platforms, Inc.
+or Anthropic, PBC. "Muse" and "Muse Code" are trademarks of their respective
+owners.
+
+The marketplace layout, command surface, and job-tracking runtime follow the
+structure of OpenAI's codex-plugin-cc (Copyright 2026 OpenAI, Apache-2.0) and
+xAI's grok-build-plugin-cc (Copyright 2026 xAI, Apache-2.0). Portions of the
+process, git, state, and job-control helpers are adapted from those projects.
+The Muse-specific runtime (headless JSONL parsing, session resume, worktree
+delegation, transcript transfer) is original to this project.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.

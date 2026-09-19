@@ -1,0 +1,7 @@
+# Muse Code Stop
+
+Stopped run-mu7n3ypg-mqcyes.
+
+- Title: Muse Code Delegate
+- Summary: add a test file for math.js that checks add and div, then run it with node
+- Check `/muse:runs` for the updated queue.
