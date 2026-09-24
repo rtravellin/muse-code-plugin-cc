@@ -37,11 +37,11 @@ import {
   claimWriteSlot,
   filterJobsForSession,
   getSessionRuntimeStatus,
-  partitionActiveWriteRuns,
   readStoredJob,
   resolveCancelableJob,
   resolveJobKindLabel,
   resolveResultJob,
+  retireDeadRuns,
   sortJobsNewestFirst
 } from "./lib/job-control.mjs";
 import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
@@ -371,10 +371,12 @@ async function waitForSingleJobSnapshot(cwd, reference, options = {}) {
   const timeoutMs = Math.max(0, Number(options.timeoutMs) || DEFAULT_STATUS_WAIT_TIMEOUT_MS);
   const pollIntervalMs = Math.max(100, Number(options.pollIntervalMs) || DEFAULT_STATUS_POLL_INTERVAL_MS);
   const deadline = Date.now() + timeoutMs;
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
   let snapshot = buildSingleJobSnapshot(cwd, reference);
 
   while (isActiveJobStatus(snapshot.job.status) && Date.now() < deadline) {
     await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - Date.now())));
+    retireDeadRuns(workspaceRoot);
     snapshot = buildSingleJobSnapshot(cwd, reference);
   }
 
@@ -387,7 +389,8 @@ async function waitForSingleJobSnapshot(cwd, reference, options = {}) {
 
 async function resolveLatestTrackedTaskThread(cwd, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot)).filter((job) => job.id !== options.excludeJobId);
+  retireDeadRuns(workspaceRoot);
+  const jobs =sortJobsNewestFirst(listJobs(workspaceRoot)).filter((job) => job.id !== options.excludeJobId);
   const visibleJobs = filterJobsForCurrentClaudeSession(jobs);
   const activeTask = visibleJobs.find(
     (job) => job.jobClass === "task" && job.kind !== STOP_GATE_KIND && (job.status === "queued" || job.status === "running")
@@ -411,12 +414,7 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
  * (a killed worker, a closed terminal) so they do not block forever.
  */
 function ensureNoConcurrentWriteRun(workspaceRoot, job) {
-  const { stale } = partitionActiveWriteRuns(sortJobsNewestFirst(listJobs(workspaceRoot)));
-  for (const staleJob of stale) {
-    const errorMessage = "The run's bridge and Muse processes are no longer running; marked failed.";
-    appendLogLine(staleJob.logFile, errorMessage);
-    claimJobTerminal(workspaceRoot, staleJob.id, "failed", { errorMessage, phase: "failed", bridgePid: null });
-  }
+  retireDeadRuns(workspaceRoot);
   const { claimed, active } = claimWriteSlot(workspaceRoot, job);
   if (claimed) {
     return;
@@ -1268,6 +1266,7 @@ async function handleStatus(argv) {
 
   const cwd = resolveCommandCwd(options);
   const reference = positionals[0] ?? "";
+  retireDeadRuns(resolveWorkspaceRoot(cwd));
   if (reference) {
     const snapshot = options.wait
       ? await waitForSingleJobSnapshot(cwd, reference, {
@@ -1295,6 +1294,7 @@ function handleResult(argv) {
 
   const cwd = resolveCommandCwd(options);
   const reference = positionals[0] ?? "";
+  retireDeadRuns(resolveWorkspaceRoot(cwd));
   const { workspaceRoot, job } = resolveResultJob(cwd, reference);
   const storedJob = readStoredJob(workspaceRoot, job.id);
   const payload = {
@@ -1313,6 +1313,7 @@ function handleTaskResumeCandidate(argv) {
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
+  retireDeadRuns(workspaceRoot);
   const sessionId = getCurrentClaudeSessionId();
   const jobs = filterJobsForCurrentClaudeSession(sortJobsNewestFirst(listJobs(workspaceRoot)));
   const candidate = findLatestResumableTaskJob(jobs);
@@ -1357,6 +1358,18 @@ function terminateJobProcessTrees(job) {
   };
 }
 
+function findRunByReference(jobs, reference) {
+  if (!reference) {
+    return null;
+  }
+  const exact = jobs.find((job) => job.id === reference);
+  if (exact) {
+    return exact;
+  }
+  const prefixMatches = jobs.filter((job) => job.id.startsWith(reference));
+  return prefixMatches.length === 1 ? prefixMatches[0] : null;
+}
+
 async function handleCancel(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd"],
@@ -1365,6 +1378,23 @@ async function handleCancel(argv) {
 
   const cwd = resolveCommandCwd(options);
   const reference = positionals[0] ?? "";
+  const ended = findRunByReference(retireDeadRuns(resolveWorkspaceRoot(cwd)), reference);
+  if (ended) {
+    const payload = {
+      jobId: ended.id,
+      status: ended.status,
+      title: ended.title,
+      killAttempted: false,
+      killDelivered: false,
+      alreadyTerminal: true
+    };
+    outputCommandResult(
+      payload,
+      `Run ${ended.id} had already ended: its bridge and Muse processes were no longer running, so it is marked failed. Nothing to stop.\n`,
+      options.json
+    );
+    return;
+  }
   const { workspaceRoot, job } = resolveCancelableJob(cwd, reference, { env: process.env });
   const existing = readStoredJob(workspaceRoot, job.id) ?? job;
   const preClaimRecord = { ...job, ...existing };
