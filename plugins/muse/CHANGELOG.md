@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- No more concurrent duplicate write runs. `run --write` refuses to start while another write-capable delegate run in the same repository is still alive, and names the run to follow (`/muse:runs <id> --wait`) or stop (`/muse:stop <id>`). Records whose processes have died are marked failed instead of blocking; `--allow-concurrent` overrides. The `muse:muse-delegate` subagent now sets the Bash tool timeout to 600000 ms, never calls `run` again when its call is backgrounded or times out, and never forwards `--wait` to the bridge. Foreground runs print their run id. The process liveness check no longer shells out to `ps` on Windows, where it made every live process look dead.
+
 ## 0.1.0
 
 - Initial release.
