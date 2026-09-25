@@ -3,7 +3,7 @@ import path from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { buildEnv, installFakeAuth, installFakeModelCatalog, installFakeMuse } from "./fake-muse-fixture.mjs";
 import { commitFile, initGitRepo, makeTempDir, run, runNode, withEnv } from "./helpers.mjs";
@@ -75,6 +75,74 @@ function writeClaudeTranscript(home, name = "sess-transfer.jsonl") {
 
 function bridge(args, cwd, env) {
   return runNode([SCRIPT, ...args], { cwd, env });
+}
+
+function bridgeAsync(args, cwd, env) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [SCRIPT, ...args], { cwd, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    child.on("error", reject);
+    child.on("close", (status) => resolve({ status, stdout, stderr }));
+  });
+}
+
+function execArgvs(logPath) {
+  if (!fs.existsSync(logPath)) {
+    return [];
+  }
+  return fs
+    .readFileSync(logPath, "utf8")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line))
+    .filter((entry) => entry.argv?.[0] === "exec")
+    .map((entry) => entry.argv);
+}
+
+function startSleeper(cwd) {
+  const child = spawn(process.execPath, ["-e", "setInterval(()=>{}, 1000)"], {
+    cwd,
+    stdio: "ignore",
+    detached: process.platform !== "win32"
+  });
+  child.unref();
+  return child.pid;
+}
+
+function exitedPid() {
+  return Number(runNode(["-e", "process.stdout.write(String(process.pid))"]).stdout);
+}
+
+function seedTaskJob(repo, env, overrides = {}) {
+  return withEnv({ CLAUDE_PLUGIN_DATA: env.CLAUDE_PLUGIN_DATA }, () => {
+    const now = new Date().toISOString();
+    const job = {
+      id: generateJobId("run"),
+      kind: "task",
+      kindLabel: "delegate",
+      title: "Muse Code Delegate",
+      workspaceRoot: repo,
+      jobClass: "task",
+      summary: "write run already in flight",
+      status: "running",
+      phase: "editing",
+      write: true,
+      createdAt: now,
+      updatedAt: now,
+      ...overrides
+    };
+    writeJobFile(repo, job.id, job);
+    upsertJob(repo, job);
+    return job;
+  });
 }
 
 function lastExecArgv(logPath) {
@@ -306,6 +374,182 @@ test("run resolves model aliases and forwards --image", () => {
   assert.match(missing.stderr, /Image not found/);
 });
 
+test("run --write refuses to start while another write-capable run is alive", () => {
+  const { repo, env, fakeLog } = setup();
+  const bridgePid = startSleeper(repo);
+  try {
+    const active = seedTaskJob(repo, env, { bridgePid, pid: bridgePid });
+    for (const args of [
+      ["run", "--write", "make the change"],
+      ["run", "--write", "--background", "make the change"],
+      ["run", "--write", "--json", "make the change"]
+    ]) {
+      const refused = bridge(args, repo, env);
+      assert.notEqual(refused.status, 0, `${args.join(" ")} must be refused`);
+      assert.match(refused.stderr, new RegExp(`${active.id} is still running`));
+      assert.ok(refused.stderr.includes(`/muse:runs ${active.id} --wait`), refused.stderr);
+      assert.ok(refused.stderr.includes(`/muse:stop ${active.id}`), refused.stderr);
+    }
+    assert.deepEqual(execArgvs(fakeLog), [], "no muse exec may start while the other write run is alive");
+    withEnv({ CLAUDE_PLUGIN_DATA: env.CLAUDE_PLUGIN_DATA }, () => {
+      const jobs = listJobs(repo);
+      assert.equal(jobs.length, 1, "refused runs are not recorded");
+      assert.equal(jobs[0].status, "running", "the live run is left alone");
+    });
+
+    const readOnly = bridge(["run", "look around without editing"], repo, env);
+    assert.equal(readOnly.status, 0, readOnly.stderr);
+
+    const allowed = bridge(["run", "--write", "--allow-concurrent", "parallel on purpose"], repo, env);
+    assert.equal(allowed.status, 0, allowed.stderr);
+    assert.equal(execArgvs(fakeLog).length, 2);
+  } finally {
+    try {
+      process.kill(bridgePid, "SIGKILL");
+    } catch {
+    }
+  }
+});
+
+test("run --write started several times at once lets exactly one through", async () => {
+  const { repo, env, fakeLog } = setup({ env: { FAKE_MUSE_EXEC_DELAY_MS: "5000" } });
+  // Preloaded into each bridge so all of them start at the same instant
+  // instead of being spread over node's startup time.
+  const barrier = path.join(makeTempDir(), "start-barrier.mjs");
+  fs.writeFileSync(
+    barrier,
+    "const wait = Number(process.env.RACE_START_AT) - Date.now();\nif (wait > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, wait);\n"
+  );
+  const raceEnv = { ...env, NODE_OPTIONS: `--import=${pathToFileURL(barrier).href}`, RACE_START_AT: String(Date.now() + 2000) };
+
+  const results = await Promise.all(
+    [0, 1, 2].map(() => bridgeAsync(["run", "--write", "--background", "--json", "make the change"], repo, raceEnv))
+  );
+  const accepted = results.filter((result) => result.status === 0);
+  assert.equal(accepted.length, 1, results.map((result) => `${result.status}: ${result.stderr}`).join("\n---\n"));
+  for (const refused of results.filter((result) => result.status !== 0)) {
+    assert.match(refused.stderr, /still (queued|running) with write access/);
+  }
+
+  const jobId = JSON.parse(accepted[0].stdout).jobId;
+  const waited = bridge(["runs", jobId, "--json", "--wait", "--timeout-ms", "30000"], repo, env);
+  assert.equal(waited.status, 0, waited.stderr);
+  assert.equal(JSON.parse(waited.stdout).job.status, "completed");
+  assert.equal(execArgvs(fakeLog).length, 1);
+  withEnv({ CLAUDE_PLUGIN_DATA: env.CLAUDE_PLUGIN_DATA }, () => {
+    assert.deepEqual(listJobs(repo).map((job) => job.id), [jobId]);
+  });
+});
+
+test("run --write retires a write-capable run whose processes are gone and starts", () => {
+  const { repo, env, fakeLog } = setup();
+  const deadPid = exitedPid();
+  const stale = seedTaskJob(repo, env, { bridgePid: deadPid, pid: deadPid, agentPid: exitedPid() });
+
+  const result = bridge(["run", "--write", "make the change"], repo, env);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(execArgvs(fakeLog).length, 1);
+  withEnv({ CLAUDE_PLUGIN_DATA: env.CLAUDE_PLUGIN_DATA }, () => {
+    const retired = listJobs(repo).find((job) => job.id === stale.id);
+    assert.equal(retired.status, "failed");
+    assert.match(retired.errorMessage, /no longer running/);
+  });
+});
+
+test("runs, runs --wait and show report a run whose processes are gone as failed", () => {
+  const { repo, env } = setup();
+  const deadPid = exitedPid();
+  const ghost = seedTaskJob(repo, env, {
+    id: generateJobId("review"),
+    kind: "review",
+    kindLabel: "review",
+    title: "Muse Code Review",
+    jobClass: "review",
+    write: false,
+    phase: "thinking",
+    summary: "review whose bridge was killed",
+    bridgePid: deadPid,
+    pid: deadPid,
+    agentPid: exitedPid()
+  });
+  const live = seedTaskJob(repo, env, { write: false, summary: "read-only run still going", bridgePid: process.pid, pid: process.pid });
+
+  const listed = bridge(["runs", "--json"], repo, env);
+  assert.equal(listed.status, 0, listed.stderr);
+  assert.deepEqual(JSON.parse(listed.stdout).running.map((job) => job.id), [live.id]);
+
+  const waited = bridge(["runs", ghost.id, "--json", "--wait", "--timeout-ms", "20000"], repo, env);
+  assert.equal(waited.status, 0, waited.stderr);
+  const payload = JSON.parse(waited.stdout);
+  assert.equal(payload.waitTimedOut, false, "--wait must not sit out its timeout on a dead run");
+  assert.equal(payload.job.status, "failed");
+  assert.match(payload.job.errorMessage, /no longer running/);
+
+  const shown = bridge(["show", ghost.id, "--json"], repo, env);
+  assert.equal(shown.status, 0, shown.stderr);
+  assert.equal(JSON.parse(shown.stdout).job.status, "failed");
+
+  const status = bridge(["runs", live.id, "--json"], repo, env);
+  assert.equal(JSON.parse(status.stdout).job.status, "running", "a run with a live process is left alone");
+});
+
+test("runs --wait notices when the run's processes die while it waits", async () => {
+  const { repo, env } = setup();
+  const bridgePid = startSleeper(repo);
+  try {
+    const job = seedTaskJob(repo, env, { write: false, bridgePid, pid: bridgePid });
+    const waiting = bridgeAsync(
+      ["runs", job.id, "--json", "--wait", "--timeout-ms", "30000", "--poll-interval-ms", "200"],
+      repo,
+      env
+    );
+    // Long enough for the bridge to be polling, so the death happens mid-wait.
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+    process.kill(bridgePid, "SIGKILL");
+
+    const waited = await waiting;
+    assert.equal(waited.status, 0, waited.stderr);
+    const payload = JSON.parse(waited.stdout);
+    assert.equal(payload.waitTimedOut, false, "--wait must stop waiting once the run's processes are gone");
+    assert.equal(payload.job.status, "failed");
+  } finally {
+    try {
+      process.kill(bridgePid, "SIGKILL");
+    } catch {
+    }
+  }
+});
+
+test("stop on a run whose processes are gone says it had already ended", () => {
+  const { repo, env } = setup();
+  const seedGhost = () => {
+    const deadPid = exitedPid();
+    return seedTaskJob(repo, env, { bridgePid: deadPid, pid: deadPid, agentPid: exitedPid() });
+  };
+
+  const first = seedGhost();
+  const stopped = bridge(["stop", first.id, "--json"], repo, env);
+  assert.equal(stopped.status, 0, stopped.stderr);
+  const payload = JSON.parse(stopped.stdout);
+  assert.equal(payload.status, "failed");
+  assert.equal(payload.alreadyTerminal, true);
+
+  const second = seedGhost();
+  const text = bridge(["stop", second.id], repo, env);
+  assert.equal(text.status, 0, text.stderr);
+  assert.match(text.stdout, /already ended/);
+  assert.doesNotMatch(text.stdout, /may still be running/);
+});
+
+test("foreground run announces its run id for follow-up commands", () => {
+  const { repo, env } = setup();
+  const result = bridge(["run", "--write", "make the change"], repo, env);
+  assert.equal(result.status, 0, result.stderr);
+  const runId = withEnv({ CLAUDE_PLUGIN_DATA: env.CLAUDE_PLUGIN_DATA }, () => listJobs(repo)[0].id);
+  assert.ok(result.stderr.includes(`Tracking this run as ${runId}`), result.stderr);
+  assert.ok(result.stderr.includes(`/muse:runs ${runId} --wait`), result.stderr);
+});
+
 test("run --write --worktree runs Muse in an isolated worktree and reports it", () => {
   const { repo, env, fakeLog } = setup();
   const result = bridge(["run", "--json", "--write", "--worktree", "--worktree-base", "main", "risky refactor"], repo, env);
@@ -371,6 +615,23 @@ test("run --resume-last continues the previous delegate session id", () => {
   assert.match(payload.rawOutput, /ZEBRA-42/);
   const argv = lastExecArgv(fakeLog);
   assert.equal(argv[argv.indexOf("--session-id") + 1], firstThread);
+});
+
+test("run --resume-last continues a delegate run whose processes died mid-run", () => {
+  const { repo, env, fakeLog } = setup();
+  const deadPid = exitedPid();
+  const threadId = "5d0c6a52-0000-4000-8000-00000000abcd";
+  seedTaskJob(repo, env, { write: false, threadId, bridgePid: deadPid, pid: deadPid, agentPid: exitedPid() });
+
+  const candidate = bridge(["run-resume-candidate", "--json"], repo, env);
+  assert.equal(candidate.status, 0, candidate.stderr);
+  assert.equal(JSON.parse(candidate.stdout).candidate?.threadId, threadId, "the interrupted run is offered for resume");
+
+  const resumed = bridge(["run", "--json", "--resume-last", "continue"], repo, env);
+  assert.equal(resumed.status, 0, resumed.stderr);
+  assert.equal(JSON.parse(resumed.stdout).resumed, true);
+  const argv = lastExecArgv(fakeLog);
+  assert.equal(argv[argv.indexOf("--session-id") + 1], threadId);
 });
 
 test("run --resume-last without history fails clearly", () => {

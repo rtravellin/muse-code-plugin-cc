@@ -144,6 +144,7 @@ Ask Muse to redesign the database connection to be more resilient.
 - `--resume` continues the last delegate run's Muse session (`muse exec --session-id <id>`), so Muse still has its context. `--fresh` starts a new session. With neither, the plugin asks whether to continue the latest run from this Claude session.
 - `--worktree` runs Muse in its own git worktree: the bridge runs `git worktree add` for a branch named `muse/session-<id>` under `.muse/worktrees/`, hands it to Muse, and leaves it in place afterwards. Your checkout is untouched. The result prints the worktree path and the `diff`, `merge`, and discard commands for it. `--worktree-base <ref>` branches from something other than `HEAD`.
 - `--image <path>` attaches a screenshot or other image.
+- One write-capable delegate run at a time per repository: while one is still alive, a second is refused with the run id to follow (`/muse:runs <id> --wait`) or stop (`/muse:stop <id>`). A record whose processes have died is marked failed instead of blocking. `--allow-concurrent` starts a second one anyway.
 - `--model` takes a catalog id or one of the aliases `spark` (`muse-spark-1.3`), `contributor` (`muse-spark-1.3-contributor`), and `spark-1.2`.
 - Every finished delegate run ends with a `muse resume <session-id>` line so you can pick the session up in Muse's own TUI; `/muse:runs` and `/muse:show` print it for reviews too.
 
@@ -179,6 +180,8 @@ Shows running and recent Muse runs for the current repository.
 /muse:runs run-abc123
 /muse:runs run-abc123 --wait
 ```
+
+A run whose bridge and `muse` processes are gone (an interrupted foreground run, a killed worker, a closed terminal) is marked failed the next time `runs`, `show` or `stop` looks at it, and `--wait` returns as soon as that happens instead of waiting out its timeout.
 
 ### `/muse:show`
 

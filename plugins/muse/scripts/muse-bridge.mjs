@@ -34,12 +34,14 @@ import { createSessionWorktree, removeSessionWorktree } from "./lib/git.mjs";
 import {
   buildSingleJobSnapshot,
   buildStatusSnapshot,
+  claimWriteSlot,
   filterJobsForSession,
   getSessionRuntimeStatus,
   readStoredJob,
   resolveCancelableJob,
   resolveJobKindLabel,
   resolveResultJob,
+  retireDeadRuns,
   sortJobsNewestFirst
 } from "./lib/job-control.mjs";
 import { binaryAvailable, terminateProcessTree } from "./lib/process.mjs";
@@ -92,7 +94,7 @@ function printUsage() {
       "  node scripts/muse-bridge.mjs check [--json] [--probe] [--enable-review-gate|--disable-review-gate]",
       "  node scripts/muse-bridge.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model>] [--effort <effort>]",
       "  node scripts/muse-bridge.mjs critique [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model>] [--effort <effort>] [focus text]",
-      "  node scripts/muse-bridge.mjs run [--background] [--write] [--worktree [--worktree-base <ref>]] [--image <path>] [--resume-last|--resume|--fresh] [--model <model|alias>] [--effort <effort>] [prompt]",
+      "  node scripts/muse-bridge.mjs run [--background] [--write] [--allow-concurrent] [--worktree [--worktree-base <ref>]] [--image <path>] [--resume-last|--resume|--fresh] [--model <model|alias>] [--effort <effort>] [prompt]",
       "  node scripts/muse-bridge.mjs transfer [--source <claude-jsonl>] [--condensed] [--json]",
       "  node scripts/muse-bridge.mjs sync-skills [--dry-run] [--force] [--json]",
       "  node scripts/muse-bridge.mjs runs [run-id] [--wait] [--timeout-ms <ms>] [--all] [--json]",
@@ -369,10 +371,12 @@ async function waitForSingleJobSnapshot(cwd, reference, options = {}) {
   const timeoutMs = Math.max(0, Number(options.timeoutMs) || DEFAULT_STATUS_WAIT_TIMEOUT_MS);
   const pollIntervalMs = Math.max(100, Number(options.pollIntervalMs) || DEFAULT_STATUS_POLL_INTERVAL_MS);
   const deadline = Date.now() + timeoutMs;
+  const workspaceRoot = resolveWorkspaceRoot(cwd);
   let snapshot = buildSingleJobSnapshot(cwd, reference);
 
   while (isActiveJobStatus(snapshot.job.status) && Date.now() < deadline) {
     await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - Date.now())));
+    retireDeadRuns(workspaceRoot);
     snapshot = buildSingleJobSnapshot(cwd, reference);
   }
 
@@ -385,7 +389,8 @@ async function waitForSingleJobSnapshot(cwd, reference, options = {}) {
 
 async function resolveLatestTrackedTaskThread(cwd, options = {}) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const jobs = sortJobsNewestFirst(listJobs(workspaceRoot)).filter((job) => job.id !== options.excludeJobId);
+  retireDeadRuns(workspaceRoot);
+  const jobs =sortJobsNewestFirst(listJobs(workspaceRoot)).filter((job) => job.id !== options.excludeJobId);
   const visibleJobs = filterJobsForCurrentClaudeSession(jobs);
   const activeTask = visibleJobs.find(
     (job) => job.jobClass === "task" && job.kind !== STOP_GATE_KIND && (job.status === "queued" || job.status === "running")
@@ -400,6 +405,28 @@ async function resolveLatestTrackedTaskThread(cwd, options = {}) {
   }
 
   return null;
+}
+
+/**
+ * Two write-capable runs in one checkout edit the same files at once. Record
+ * this run as queued unless another is alive, in one locked step so runs
+ * started together cannot both pass; retire records whose processes are gone
+ * (a killed worker, a closed terminal) so they do not block forever.
+ */
+function ensureNoConcurrentWriteRun(workspaceRoot, job) {
+  retireDeadRuns(workspaceRoot);
+  const { claimed, active } = claimWriteSlot(workspaceRoot, job);
+  if (claimed) {
+    return;
+  }
+  throw new Error(
+    [
+      `Muse delegate run ${active.id} is still ${active.status} with write access in this repository, so a second write-capable run was not started.`,
+      `Wait for it: /muse:runs ${active.id} --wait`,
+      `Stop it:     /muse:stop ${active.id}`,
+      "Pass --allow-concurrent to start another one anyway."
+    ].join("\n")
+  );
 }
 
 async function executeReviewRun(request) {
@@ -1032,7 +1059,7 @@ async function handleReview(argv) {
 async function handleTask(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["model", "effort", "cwd", "prompt-file", "image", "worktree-base"],
-    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background", "stop-gate", "worktree"],
+    booleanOptions: ["json", "write", "resume-last", "resume", "fresh", "background", "stop-gate", "worktree", "allow-concurrent"],
     aliasMap: {
       m: "model",
       w: "worktree"
@@ -1070,8 +1097,14 @@ async function handleTask(argv) {
   if (options.background) {
     ensureMuseAvailable(cwd);
     requireTaskRequest(prompt, resumeLast);
+  }
 
-    const job = buildTaskJob(workspaceRoot, taskMetadata, write, stopGate);
+  const job = buildTaskJob(workspaceRoot, taskMetadata, write, stopGate);
+  if (write && !options["allow-concurrent"]) {
+    ensureNoConcurrentWriteRun(workspaceRoot, job);
+  }
+
+  if (options.background) {
     const request = {
       kind: "task",
       ...buildTaskRequest({
@@ -1093,7 +1126,14 @@ async function handleTask(argv) {
     return;
   }
 
-  const job = buildTaskJob(workspaceRoot, taskMetadata, write, stopGate);
+  if (!options.json) {
+    // If the caller's shell gives up on us (Claude Code's Bash tool backgrounds
+    // a call after its timeout), this is how to find the run instead of
+    // starting it again.
+    process.stderr.write(
+      `[muse-cc] Tracking this run as ${job.id}. If this call is backgrounded or times out, use /muse:runs ${job.id} --wait instead of starting another run.\n`
+    );
+  }
   await runForegroundCommand(
     job,
     (progress) =>
@@ -1226,6 +1266,7 @@ async function handleStatus(argv) {
 
   const cwd = resolveCommandCwd(options);
   const reference = positionals[0] ?? "";
+  retireDeadRuns(resolveWorkspaceRoot(cwd));
   if (reference) {
     const snapshot = options.wait
       ? await waitForSingleJobSnapshot(cwd, reference, {
@@ -1253,6 +1294,7 @@ function handleResult(argv) {
 
   const cwd = resolveCommandCwd(options);
   const reference = positionals[0] ?? "";
+  retireDeadRuns(resolveWorkspaceRoot(cwd));
   const { workspaceRoot, job } = resolveResultJob(cwd, reference);
   const storedJob = readStoredJob(workspaceRoot, job.id);
   const payload = {
@@ -1271,6 +1313,7 @@ function handleTaskResumeCandidate(argv) {
 
   const cwd = resolveCommandCwd(options);
   const workspaceRoot = resolveCommandWorkspace(options);
+  retireDeadRuns(workspaceRoot);
   const sessionId = getCurrentClaudeSessionId();
   const jobs = filterJobsForCurrentClaudeSession(sortJobsNewestFirst(listJobs(workspaceRoot)));
   const candidate = findLatestResumableTaskJob(jobs);
@@ -1315,6 +1358,18 @@ function terminateJobProcessTrees(job) {
   };
 }
 
+function findRunByReference(jobs, reference) {
+  if (!reference) {
+    return null;
+  }
+  const exact = jobs.find((job) => job.id === reference);
+  if (exact) {
+    return exact;
+  }
+  const prefixMatches = jobs.filter((job) => job.id.startsWith(reference));
+  return prefixMatches.length === 1 ? prefixMatches[0] : null;
+}
+
 async function handleCancel(argv) {
   const { options, positionals } = parseCommandInput(argv, {
     valueOptions: ["cwd"],
@@ -1323,6 +1378,23 @@ async function handleCancel(argv) {
 
   const cwd = resolveCommandCwd(options);
   const reference = positionals[0] ?? "";
+  const ended = findRunByReference(retireDeadRuns(resolveWorkspaceRoot(cwd)), reference);
+  if (ended) {
+    const payload = {
+      jobId: ended.id,
+      status: ended.status,
+      title: ended.title,
+      killAttempted: false,
+      killDelivered: false,
+      alreadyTerminal: true
+    };
+    outputCommandResult(
+      payload,
+      `Run ${ended.id} had already ended: its bridge and Muse processes were no longer running, so it is marked failed. Nothing to stop.\n`,
+      options.json
+    );
+    return;
+  }
   const { workspaceRoot, job } = resolveCancelableJob(cwd, reference, { env: process.env });
   const existing = readStoredJob(workspaceRoot, job.id) ?? job;
   const preClaimRecord = { ...job, ...existing };

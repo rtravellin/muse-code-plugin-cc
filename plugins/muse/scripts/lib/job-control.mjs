@@ -1,11 +1,14 @@
 import fs from "node:fs";
 
-import { getConfig, listJobs, readJobFile, resolveJobFile } from "./state.mjs";
-import { SESSION_ID_ENV } from "./tracked-jobs.mjs";
+import { isProcessAlive } from "./process.mjs";
+import { claimJobTerminal, getConfig, listJobs, readJobFile, resolveJobFile, updateState } from "./state.mjs";
+import { appendLogLine, resolveJobKillTargets, SESSION_ID_ENV } from "./tracked-jobs.mjs";
 import { resolveWorkspaceRoot } from "./workspace.mjs";
 
 export const DEFAULT_MAX_STATUS_JOBS = 8;
 export const DEFAULT_MAX_PROGRESS_LINES = 4;
+// A background run is recorded as queued a moment before its worker pid is.
+const UNSTARTED_RUN_GRACE_MS = 60000;
 
 export function sortJobsNewestFirst(jobs) {
   return [...jobs].sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")));
@@ -180,6 +183,76 @@ export function enrichJob(job, options = {}) {
     ...enriched,
     phase: enriched.phase ?? inferLegacyJobPhase(enriched, enriched.progressPreview)
   };
+}
+
+/**
+ * Queued or running runs, split by whether any of their recorded processes
+ * (agent, bridge worker) is still alive. A run with no pid recorded yet
+ * counts as live for a short grace period.
+ */
+export function partitionActiveRuns(jobs, options = {}) {
+  const isAlive = options.isAlive ?? isProcessAlive;
+  const now = options.now ?? Date.now();
+  const live = [];
+  const stale = [];
+  for (const job of jobs) {
+    if (job.status !== "queued" && job.status !== "running") {
+      continue;
+    }
+    const pids = resolveJobKillTargets(job);
+    if (pids.length > 0) {
+      (pids.some((pid) => isAlive(pid)) ? live : stale).push(job);
+      continue;
+    }
+    const stamp = Date.parse(job.updatedAt ?? job.createdAt ?? "");
+    (Number.isFinite(stamp) && now - stamp < UNSTARTED_RUN_GRACE_MS ? live : stale).push(job);
+  }
+  return { live, stale };
+}
+
+export function partitionActiveWriteRuns(jobs, options = {}) {
+  return partitionActiveRuns(
+    jobs.filter((job) => job.jobClass === "task" && job.write),
+    options
+  );
+}
+
+/**
+ * Mark failed every queued or running run whose processes are gone (a killed
+ * bridge, an interrupted foreground run, a closed terminal), so status, wait,
+ * show and stop see that it ended instead of reporting it running forever.
+ * Returns the runs it retired.
+ */
+export function retireDeadRuns(workspaceRoot, options = {}) {
+  const { stale } = partitionActiveRuns(listJobs(workspaceRoot), options);
+  const retired = [];
+  for (const job of stale) {
+    const errorMessage = "The run's bridge and Muse processes are no longer running; marked failed.";
+    const claim = claimJobTerminal(workspaceRoot, job.id, "failed", { errorMessage, phase: "failed", bridgePid: null });
+    if (claim.claimed) {
+      appendLogLine(job.logFile, errorMessage);
+      retired.push(claim.job);
+    }
+  }
+  return retired;
+}
+
+/**
+ * Record a write-capable run as queued unless another one is alive in this
+ * workspace. The check and the record share one state lock, so two bridges
+ * started at the same moment cannot both pass the check.
+ */
+export function claimWriteSlot(workspaceRoot, job, options = {}) {
+  let active = null;
+  updateState(workspaceRoot, (state) => {
+    active = partitionActiveWriteRuns(sortJobsNewestFirst(state.jobs), options).live[0] ?? null;
+    if (active) {
+      return;
+    }
+    const now = new Date().toISOString();
+    state.jobs.unshift({ createdAt: now, ...job, status: "queued", phase: "queued", updatedAt: now });
+  });
+  return { claimed: !active, active };
 }
 
 export function readStoredJob(workspaceRoot, jobId) {
