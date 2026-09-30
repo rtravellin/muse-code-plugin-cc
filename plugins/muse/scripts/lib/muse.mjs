@@ -38,6 +38,27 @@ export function normalizeRequestedModel(model) {
   return MODEL_ALIASES.get(normalized.toLowerCase()) ?? normalized;
 }
 
+// Without --model, `muse exec` runs its catalog default, the contributor
+// model. The bridge always names a model so that one is only used on request.
+export const MODEL_ENV = "MUSE_CC_MODEL";
+export const DEFAULT_MODEL_ALIAS = "spark";
+
+/** The model a run uses: --model, then MUSE_CC_MODEL, then `spark`. */
+export function resolveModelSelection(requested, env = process.env) {
+  const candidates = [
+    [requested, "flag"],
+    [env?.[MODEL_ENV], "env"],
+    [DEFAULT_MODEL_ALIAS, "default"]
+  ];
+  for (const [value, source] of candidates) {
+    const model = normalizeRequestedModel(value);
+    if (model) {
+      return { model, source, requested: String(value).trim() };
+    }
+  }
+  return null;
+}
+
 function parseModelCatalog(files) {
   const rows = [];
   for (const raw of files) {
@@ -682,7 +703,10 @@ export function runHeadlessAgent(cwd, options = {}) {
       }
       return absolute;
     });
-  const args = buildExecArgs({ ...options, sessionId }, { promptFile, schemaFile, imageFiles });
+  const args = buildExecArgs(
+    { ...options, sessionId, model: resolveModelSelection(options.model, env).model },
+    { promptFile, schemaFile, imageFiles }
+  );
   const launch = buildMuseLaunch(runtime, cwd, args, { env });
   const mapBack = (text) => (runtime.platform === "win32" ? normalizeWindowsText(text, cwd) : text);
 
