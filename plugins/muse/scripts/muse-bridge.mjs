@@ -95,7 +95,7 @@ function printUsage() {
       "  node scripts/muse-bridge.mjs review [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model>] [--effort <effort>]",
       "  node scripts/muse-bridge.mjs critique [--wait|--background] [--base <ref>] [--scope <auto|working-tree|branch>] [--model <model>] [--effort <effort>] [focus text]",
       "  node scripts/muse-bridge.mjs run [--background] [--write] [--allow-concurrent] [--worktree [--worktree-base <ref>]] [--image <path>] [--resume-last|--resume|--fresh] [--model <model|alias>] [--effort <effort>] [prompt]",
-      "  node scripts/muse-bridge.mjs transfer [--source <claude-jsonl>] [--condensed] [--json]",
+      "  node scripts/muse-bridge.mjs transfer [--source <claude-jsonl>] [--condensed] [--model <model|alias>] [--effort <effort>] [--json]",
       "  node scripts/muse-bridge.mjs sync-skills [--dry-run] [--force] [--json]",
       "  node scripts/muse-bridge.mjs runs [run-id] [--wait] [--timeout-ms <ms>] [--all] [--json]",
       "  node scripts/muse-bridge.mjs show [run-id] [--json]",
@@ -830,6 +830,7 @@ async function runNativeTransfer(workspaceRoot, sourcePath, transcript, options 
     webTools: false,
     trustWorkspace: true,
     maxModelSteps: 24,
+    model: options.model,
     effort: options.effort ?? "low",
     onProgress: options.onProgress
   });
@@ -850,6 +851,7 @@ async function runCondensedTransfer(workspaceRoot, transcript, options = {}) {
     webTools: false,
     trustWorkspace: true,
     maxModelSteps: 2,
+    model: options.model,
     effort: options.effort ?? "low",
     onProgress: options.onProgress
   });
@@ -1182,8 +1184,11 @@ async function handleSyncSkills(argv) {
 
 async function handleTransfer(argv) {
   const { options } = parseCommandInput(argv, {
-    valueOptions: ["cwd", "source", "effort"],
-    booleanOptions: ["json", "condensed"]
+    valueOptions: ["cwd", "source", "model", "effort"],
+    booleanOptions: ["json", "condensed"],
+    aliasMap: {
+      m: "model"
+    }
   });
 
   const cwd = resolveCommandCwd(options);
@@ -1193,6 +1198,7 @@ async function handleTransfer(argv) {
   const { payload, rendered } = await executeTransfer(cwd, {
     source: options.source,
     condensed: Boolean(options.condensed),
+    model: normalizeRequestedModel(options.model),
     effort: normalizeReasoningEffort(options.effort) ?? undefined,
     onProgress: progress
   });
