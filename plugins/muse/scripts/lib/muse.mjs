@@ -38,6 +38,27 @@ export function normalizeRequestedModel(model) {
   return MODEL_ALIASES.get(normalized.toLowerCase()) ?? normalized;
 }
 
+// Without --model, `muse exec` runs its catalog default, the contributor
+// model. The bridge always names a model so that one is only used on request.
+export const MODEL_ENV = "MUSE_CC_MODEL";
+export const DEFAULT_MODEL_ALIAS = "spark";
+
+/** The model a run uses: --model, then MUSE_CC_MODEL, then `spark`. */
+export function resolveModelSelection(requested, env = process.env) {
+  const candidates = [
+    [requested, "flag"],
+    [env?.[MODEL_ENV], "env"],
+    [DEFAULT_MODEL_ALIAS, "default"]
+  ];
+  for (const [value, source] of candidates) {
+    const model = normalizeRequestedModel(value);
+    if (model) {
+      return { model, source, requested: String(value).trim() };
+    }
+  }
+  return null;
+}
+
 function parseModelCatalog(files) {
   const rows = [];
   for (const raw of files) {
@@ -657,7 +678,8 @@ function buildExecArgs(options, paths) {
 
 /**
  * Run one headless Muse turn (`muse exec --json`) in `cwd` and collect the
- * final answer. Pass `sessionId` to continue an earlier headless session.
+ * final answer. Pass `sessionId` to continue an earlier headless session,
+ * with `resume: true` so the session keeps its model unless one is given.
  */
 export function runHeadlessAgent(cwd, options = {}) {
   const env = options.env ?? process.env;
@@ -693,6 +715,9 @@ export function runHeadlessAgent(cwd, options = {}) {
     {
       ...options,
       sessionId,
+      // Muse keeps a resumed session's model when --model is omitted, so the
+      // plugin default only applies to new sessions.
+      model: options.resume ? normalizeRequestedModel(options.model) : resolveModelSelection(options.model, env).model,
       foreignContext: options.foreignContext ?? env[FOREIGN_CONTEXT_ENV] === "1"
     },
     { promptFile, schemaFile, imageFiles }
