@@ -363,11 +363,10 @@ export function resolveCancelableJob(cwd, reference, options = {}) {
   const activeJobs = jobs.filter((job) => job.status === "queued" || job.status === "running");
 
   if (reference) {
-    const selected = matchJobReference(activeJobs, reference);
-    if (!selected) {
-      throw new Error(`No active run found for "${reference}".`);
-    }
-    return { workspaceRoot, job: selected };
+    // Match finished and live runs together, so a prefix shared by both is
+    // ambiguous; a run that already finished is reported as such.
+    const selected = matchJobReference(jobs, reference);
+    return { workspaceRoot, job: selected, finished: !activeJobs.includes(selected) };
   }
 
   const sessionScopedActiveJobs = filterJobsForCurrentSession(activeJobs, options);

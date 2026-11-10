@@ -547,6 +547,55 @@ test("runs, runs --wait and show report a run whose processes are gone as failed
   assert.equal(JSON.parse(status.stdout).job.status, "running", "a run with a live process is left alone");
 });
 
+test("stop on a run that already finished says so, and an unknown id still errors", () => {
+  const { repo, env } = setup();
+  const done = seedTaskJob(repo, env, { status: "completed", phase: "done" });
+
+  const text = bridge(["stop", done.id], repo, env);
+  assert.equal(text.status, 0, text.stderr);
+  assert.ok(text.stdout.includes(`${done.id} is already completed; nothing to stop`), text.stdout);
+
+  const json = bridge(["stop", done.id, "--json"], repo, env);
+  assert.equal(json.status, 0, json.stderr);
+  const payload = JSON.parse(json.stdout);
+  assert.equal(payload.status, "completed");
+  assert.equal(payload.alreadyTerminal, true);
+  withEnv({ CLAUDE_PLUGIN_DATA: env.CLAUDE_PLUGIN_DATA }, () => {
+    assert.equal(listJobs(repo).find((job) => job.id === done.id).status, "completed", "the record is left as it was");
+  });
+
+  const unknown = bridge(["stop", "run-does-not-exist"], repo, env);
+  assert.notEqual(unknown.status, 0);
+  assert.match(unknown.stderr, /No run found for "run-does-not-exist"/);
+});
+
+test("stop with a prefix matching both a finished and a live run is ambiguous", () => {
+  const { repo, env } = setup();
+  const bridgePid = startSleeper(repo);
+  try {
+    seedTaskJob(repo, env, { id: "run-pair-done", status: "completed", phase: "done" });
+    seedTaskJob(repo, env, { id: "run-pair-live", bridgePid, pid: bridgePid });
+
+    const result = bridge(["stop", "run-pair"], repo, env);
+    assert.notEqual(result.status, 0, result.stdout);
+    assert.match(result.stderr, /ambiguous/);
+    withEnv({ CLAUDE_PLUGIN_DATA: env.CLAUDE_PLUGIN_DATA }, () => {
+      assert.equal(listJobs(repo).find((job) => job.id === "run-pair-live").status, "running");
+    });
+    assert.equal(isProcessAlive(bridgePid), true, "the live run must not be stopped");
+
+    const exact = bridge(["stop", "run-pair-done"], repo, env);
+    assert.equal(exact.status, 0, exact.stderr);
+    assert.match(exact.stdout, /already completed; nothing to stop/);
+    assert.equal(isProcessAlive(bridgePid), true, "stopping the finished run leaves the live one alone");
+  } finally {
+    try {
+      process.kill(bridgePid, "SIGKILL");
+    } catch {
+    }
+  }
+});
+
 test("runs --wait notices when the run's processes die while it waits", async () => {
   const { repo, env } = setup();
   const bridgePid = startSleeper(repo);
